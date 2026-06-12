@@ -142,6 +142,29 @@ def iou_batch(bboxes1, bboxes2):
     return (o)
 
 
+def _tensor_indices_to_numpy(indices):
+    if isinstance(indices, torch.Tensor):
+        return indices.detach().cpu().numpy().astype(np.int64)
+    return np.asarray(indices, dtype=np.int64)
+
+
+def _numpy_indices_to_tensor(indices, device):
+    return torch.as_tensor(indices, dtype=torch.long, device=device)
+
+
+def filter_segmentation_outputs(masks, scores, class_values, threshold):
+    keep_indices = torch.nonzero(scores > threshold, as_tuple=False).flatten()
+    masks = torch.index_select(masks, 0, keep_indices)
+
+    class_values = np.asarray(class_values)
+    kept_classes = class_values[_tensor_indices_to_numpy(keep_indices)]
+
+    base_indices = np.where(kept_classes == 0)[0]
+    base_masks = masks[_numpy_indices_to_tensor(base_indices, masks.device)]
+
+    return masks, kept_classes, base_masks
+
+
 class DataAnalysis:
     def __init__(self, imagesfolder, videopath, savefolder, extension, modelweightsloc, device, height, width, fps, px):
         self.imagesfolder = imagesfolder
@@ -250,14 +273,11 @@ class DataAnalysis:
 
                 masks = outputs['instances'].pred_masks.cpu()
                 scores = outputs['instances'].scores.cpu()
-                index_tensor = torch.tensor([k for k in range(len(masks))])
-                index_to_keep = index_tensor[scores > thres]
-                masks = torch.index_select(masks, 0, index_to_keep)
-                class_val = np.array(class_val)[index_to_keep]
+                masks, class_val, masks_base = filter_segmentation_outputs(
+                    masks, scores, class_val, thres
+                )
                 combined_mask = torch.any(masks, axis=0)
                 vapor.append(torch.sum(combined_mask).item())
-                indexs = np.where(np.array(class_val) == 0)[0]
-                masks_base = masks[indexs]
                 combined_mask = torch.any(masks_base, axis=0)
                 vapor_base.append(torch.sum(combined_mask).item())
                 pixel_count = torch.sum(masks, dim=(1, 2)).numpy()
@@ -978,16 +998,12 @@ class DataAnalysis:
 
             masks = outputs['instances'].pred_masks.cpu()
             scores = outputs['instances'].scores.cpu()
-            index_tensor = torch.tensor([k for k in range(len(masks))])
-            index_to_keep = index_tensor[scores > thres]
-            masks = torch.index_select(masks, 0, index_to_keep)
-
-            class_val = np.array(class_val)[index_to_keep]
+            masks, class_val, masks_base = filter_segmentation_outputs(
+                masks, scores, class_val, thres
+            )
 
             combined_mask = torch.any(masks, axis=0)
             vapor.append(torch.sum(combined_mask).item())
-            indexs = np.where(np.array(class_val) == 0)[0]
-            masks_base = masks[indexs]
             combined_mask = torch.any(masks_base, axis=0)
             vapor_base.append(torch.sum(combined_mask).item())
             pixel_count = torch.sum(masks, dim=(1, 2)).numpy()

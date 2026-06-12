@@ -89,10 +89,15 @@ For in depth description of functions available please view the [read the docs](
 
 
 ## Training your own model:
-1. Annotate image data, Lableme was used for our dataset. Find our annotated data [here](https://osf.io/3nwyx/).
-2. Convert labelme dataset to coco format
-3. Run training
-4. See Using the BubbleID Framework but use your new model weights
+BubbleID trains Detectron2 Mask R-CNN models from COCO-format instance segmentation annotations. YOLO-format labels are not accepted directly.
+
+1. Annotate image data. Labelme was used for our dataset; find our annotated data [here](https://osf.io/3nwyx/).
+2. Convert the annotations to a COCO JSON file.
+3. Run `TrainSegmentationModel(datapath, savename)`, where `datapath` is the COCO JSON path and `savename` is the checkpoint filename to load from `./Models` after training.
+4. See Using the BubbleID Framework but use your new model weights.
+
+## Source layout
+The importable package source is in `BubbleID/`. Versioned folders such as `BubbleID_0.0.7/` and `BubbleID_0.0.8/` are retained as historical release snapshots.
    
 
 <p align="center">
