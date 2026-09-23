@@ -52,6 +52,10 @@ Install Additional Dependencies:
   ```bash
   pip install numpy==1.23 opencv-python filterpy super-gradients
 ```
+If you plan to use `FineTuneModel`, also install `shapely` (required by Detectron2's random-crop augmentation on polygon annotations):
+  ```bash
+  pip install shapely
+  ```
 Install BubbleID:
   ```bash
   pip install bubbleid
@@ -93,11 +97,30 @@ BubbleID trains Detectron2 Mask R-CNN models from COCO-format instance segmentat
 
 1. Annotate image data. Labelme was used for our dataset; find our annotated data [here](https://osf.io/3nwyx/).
 2. Convert the annotations to a COCO JSON file.
-3. Run `TrainSegmentationModel(datapath, savename)`, where `datapath` is the COCO JSON path and `savename` is the checkpoint filename to load from `./Models` after training.
+3. Train a model from scratch (starting from the Detectron2 COCO Mask R-CNN weights) or fine-tune existing BubbleID weights:
+   ```python
+   from BubbleID import BubbleID
+
+   # Train: returns the path to the saved weights, ./Models/my_model.pth
+   weights = BubbleID.TrainSegmentationModel("train_coco.json", savename="my_model.pth",
+                                             max_iter=1000, base_lr=0.00025, device="cuda")
+
+   # Fine-tune: keeps the checkpoint with the best validation AP, returns ./finetuned/model_best.pth
+   weights = BubbleID.FineTuneModel("./finetuned", "pretrained_weights.pth", "train_coco.json", "val_coco.json",
+                                    device="cuda", max_iter=1000, base_lr=1e-5)
+   ```
+   Optional training arguments (defaults in parentheses):
+   * `TrainSegmentationModel`: `output_dir` (`"./Models"`), `max_iter` (1000), `base_lr` (0.00025), `ims_per_batch` (2), `batch_size_per_image` (256), `num_workers` (2), `device`, `image_root` (`""`).
+   * `FineTuneModel`: `device`, `max_iter` (1000), `base_lr` (1e-5), `ims_per_batch` (1), `batch_size_per_image` (64), `eval_period` (100), `freeze_at` (5), `num_workers` (0), `image_root` (`""`).
+
+   `device` accepts `"cpu"`, `"cuda"`, or `"gpu"`; if omitted, CUDA is used when available. `image_root` is the folder that image paths in the COCO JSON are relative to.
 4. See Using the BubbleID Framework but use your new model weights.
 
 ## Source layout
-The importable package source is in `BubbleID/`. Versioned folders such as `BubbleID_0.0.7/` and `BubbleID_0.0.8/` are retained as historical release snapshots.
+The importable package source is in `BubbleID/`. Versioned folders such as `BubbleID_0.0.7/` and `BubbleID_0.0.8/` are retained as historical release snapshots. The `BubbleID_0.0.8/` folder is the source that was published to PyPI as 0.0.9 (git tag [`V0.0.9`](https://github.com/cldunlap73/BubbleID/tree/V0.0.9)); the fixes in `BubbleID/` will ship in the next PyPI release.
+
+## Related projects
+* [BubbleID-cpp](https://github.com/Crucifixion-Fxl/BubbleID-cpp): an independent, community C++ reimplementation for high-performance inference (not maintained by the BubbleID authors).
    
 
 <p align="center">
