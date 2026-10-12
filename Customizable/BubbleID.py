@@ -77,6 +77,7 @@ from detectron2.engine import DefaultTrainer
 from detectron2.data import detection_utils as utils
 import detectron2.data.transforms as T
 import copy
+import shutil
 import torch
 
 from detectron2.engine import DefaultTrainer
@@ -141,6 +142,29 @@ def iou_batch(bboxes1, bboxes2):
     o = wh / ((bboxes1[..., 2] - bboxes1[..., 0]) * (bboxes1[..., 3] - bboxes1[..., 1])
               + (bboxes2[..., 2] - bboxes2[..., 0]) * (bboxes2[..., 3] - bboxes2[..., 1]) - wh)
     return (o)
+
+
+def _tensor_indices_to_numpy(indices):
+    if isinstance(indices, torch.Tensor):
+        return indices.detach().cpu().numpy().astype(np.int64)
+    return np.asarray(indices, dtype=np.int64)
+
+
+def _numpy_indices_to_tensor(indices, device):
+    return torch.as_tensor(indices, dtype=torch.long, device=device)
+
+
+def filter_segmentation_outputs(masks, scores, class_values, threshold):
+    keep_indices = torch.nonzero(scores > threshold, as_tuple=False).flatten()
+    masks = torch.index_select(masks, 0, keep_indices)
+
+    class_values = np.asarray(class_values)
+    kept_classes = class_values[_tensor_indices_to_numpy(keep_indices)]
+
+    base_indices = np.where(kept_classes == 0)[0]
+    base_masks = masks[_numpy_indices_to_tensor(base_indices, masks.device)]
+
+    return masks, kept_classes, base_masks
 
 
 class DataAnalysis:
@@ -251,14 +275,11 @@ class DataAnalysis:
 
                 masks = outputs['instances'].pred_masks.cpu()
                 scores = outputs['instances'].scores.cpu()
-                index_tensor = torch.tensor([k for k in range(len(masks))])
-                index_to_keep = index_tensor[scores > thres]
-                masks = torch.index_select(masks, 0, index_to_keep)
-                class_val = np.array(class_val)[index_to_keep]
+                masks, class_val, masks_base = filter_segmentation_outputs(
+                    masks, scores, class_val, thres
+                )
                 combined_mask = torch.any(masks, axis=0)
                 vapor.append(torch.sum(combined_mask).item())
-                indexs = np.where(np.array(class_val) == 0)[0]
-                masks_base = masks[indexs]
                 combined_mask = torch.any(masks_base, axis=0)
                 vapor_base.append(torch.sum(combined_mask).item())
                 pixel_count = torch.sum(masks, dim=(1, 2)).numpy()
@@ -979,16 +1000,12 @@ class DataAnalysis:
 
             masks = outputs['instances'].pred_masks.cpu()
             scores = outputs['instances'].scores.cpu()
-            index_tensor = torch.tensor([k for k in range(len(masks))])
-            index_to_keep = index_tensor[scores > thres]
-            masks = torch.index_select(masks, 0, index_to_keep)
-
-            class_val = np.array(class_val)[index_to_keep]
+            masks, class_val, masks_base = filter_segmentation_outputs(
+                masks, scores, class_val, thres
+            )
 
             combined_mask = torch.any(masks, axis=0)
             vapor.append(torch.sum(combined_mask).item())
-            indexs = np.where(np.array(class_val) == 0)[0]
-            masks_base = masks[indexs]
             combined_mask = torch.any(masks_base, axis=0)
             vapor_base.append(torch.sum(combined_mask).item())
             pixel_count = torch.sum(masks, dim=(1, 2)).numpy()
@@ -1252,25 +1269,46 @@ class DataAnalysis:
             np.save(bubclassind_file, bub_class)
 
 
-def TrainSegmentationModel(datapath, savename):
-    register_coco_instances("my_dataset_train", {}, datapath, "")
-    train_metadata = MetadataCatalog.get("my_dataset_train")
-    train_dataset_dicts = DatasetCatalog.get("my_dataset_train")
+def _resolve_device(device):
+    # Accept the "gpu" spelling used by DataAnalysis; Detectron2 expects "cuda".
+    if device is None:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return "cuda" if device == "gpu" else device
+
+
+def _register_coco_dataset(name, json_path, image_root=""):
+    # Re-registering a name raises in Detectron2, which breaks re-running training in Jupyter/Spyder.
+    if name in DatasetCatalog.list():
+        DatasetCatalog.remove(name)
+        MetadataCatalog.remove(name)
+    register_coco_instances(name, {}, json_path, image_root)
+
+
+def TrainSegmentationModel(datapath, savename="model_final.pth", output_dir="./Models", max_iter=1000,
+                           base_lr=0.00025, ims_per_batch=2, batch_size_per_image=256, num_workers=2,
+                           device=None, image_root=""):
+    """Train a Mask R-CNN bubble segmentation model from a COCO-format annotation file.
+
+    datapath: path to the COCO JSON file. image_root: folder that image paths in the JSON are relative to.
+    savename: filename of the trained weights, written to output_dir. Returns the path to the weights.
+    """
+    _register_coco_dataset("my_dataset_train", datapath, image_root)
 
     cfg = get_cfg()
-    cfg.OUTPUT_DIR = "./Models"
+    cfg.OUTPUT_DIR = output_dir
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
     cfg.DATASETS.TRAIN = ("my_dataset_train",)
     cfg.DATASETS.TEST = ()
-    cfg.DATALOADER.NUM_WORKERS = 2
+    cfg.DATALOADER.NUM_WORKERS = num_workers
+    cfg.MODEL.DEVICE = _resolve_device(device)
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
         "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")  # Let training initialize from model zoo
     # cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final_MATLAB1.pth")  # path to the model we just trained
-    cfg.SOLVER.IMS_PER_BATCH = 2  # This is the real "batch size" commonly known to deep learning people
-    cfg.SOLVER.BASE_LR = 0.00025  # pick a good LR
-    cfg.SOLVER.MAX_ITER = 1000  # 1000 iterations seems good enough for this dataset
+    cfg.SOLVER.IMS_PER_BATCH = ims_per_batch  # This is the real "batch size" commonly known to deep learning people
+    cfg.SOLVER.BASE_LR = base_lr
+    cfg.SOLVER.MAX_ITER = max_iter  # 1000 iterations seems good enough for this dataset
     cfg.SOLVER.STEPS = []  # do not decay learning rate
-    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 256  # Default is 512, using 256 for this dataset.
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = batch_size_per_image  # Detectron2 default is 512
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # We have 1 classes.
     # NOTE: this config means the number of classes, without the background. Do not use num_classes+1 here.
 
@@ -1317,14 +1355,23 @@ def TrainSegmentationModel(datapath, savename):
 
     trainer.train()  # Start the training process
 
-    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, savename)  # path to the model we just trained
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5  # set a custom testing threshold
-    predictor = DefaultPredictor(cfg)
+    # DefaultTrainer always writes model_final.pth; copy it to the requested name.
+    final_weights = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    saved_weights = os.path.join(cfg.OUTPUT_DIR, savename)
+    if os.path.abspath(saved_weights) != os.path.abspath(final_weights):
+        shutil.copyfile(final_weights, saved_weights)
+    return saved_weights
 
 
-def FineTuneModel(savefolder, pastmodel, traincoco, valcoco,device):
-    register_coco_instances("train", {}, traincoco, "")
-    register_coco_instances("val", {}, valcoco, "")
+def FineTuneModel(savefolder, pastmodel, traincoco, valcoco, device=None, max_iter=1000, base_lr=1e-5,
+                  ims_per_batch=1, batch_size_per_image=64, eval_period=100, freeze_at=5, num_workers=0,
+                  image_root=""):
+    """Fine-tune existing segmentation weights (pastmodel) on COCO-format train/val annotation files.
+
+    The checkpoint with the best validation AP is saved as model_best.pth in savefolder; its path is returned.
+    """
+    _register_coco_dataset("train", traincoco, image_root)
+    _register_coco_dataset("val", valcoco, image_root)
 
     # Custom data mapper with augmentations
     def custom_mapper(dataset_dict):
@@ -1356,15 +1403,15 @@ def FineTuneModel(savefolder, pastmodel, traincoco, valcoco,device):
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
     cfg.DATASETS.TRAIN = ("train",)
     cfg.DATASETS.TEST = ("val",)  # Enable validation
-    cfg.DATALOADER.NUM_WORKERS = 0
+    cfg.DATALOADER.NUM_WORKERS = num_workers
     cfg.MODEL.WEIGHTS = pastmodel  # pretrained or previous checkpoint
-    cfg.MODEL.BACKBONE.FREEZE_AT = 5
-    cfg.SOLVER.IMS_PER_BATCH = 1
-    cfg.SOLVER.BASE_LR = 1e-5
-    cfg.SOLVER.MAX_ITER = 1000
-    cfg.MODEL.DEVICE= Device
-    cfg.TEST.EVAL_PERIOD = 100  # Evaluate every 100 iterations
-    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 64
+    cfg.MODEL.BACKBONE.FREEZE_AT = freeze_at
+    cfg.SOLVER.IMS_PER_BATCH = ims_per_batch
+    cfg.SOLVER.BASE_LR = base_lr
+    cfg.SOLVER.MAX_ITER = max_iter
+    cfg.MODEL.DEVICE = _resolve_device(device)
+    cfg.TEST.EVAL_PERIOD = eval_period  # Evaluate every eval_period iterations
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = batch_size_per_image
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
     cfg.OUTPUT_DIR = savefolder
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
@@ -1399,6 +1446,7 @@ def FineTuneModel(savefolder, pastmodel, traincoco, valcoco,device):
     trainer = BestModelTrainer(cfg)
     trainer.resume_or_load(resume=False)
     trainer.train()
+    return os.path.join(cfg.OUTPUT_DIR, "model_best.pth")
 
 
 def TrainCNNClassification(savename):
